@@ -1,118 +1,173 @@
 import aiohttp
 import asyncio
 import base64
+import time
+import os
 from typing import Dict, List, Optional, Any
 from cachetools import TTLCache
+from dotenv import load_dotenv, set_key
 from config import Config
-import json
+
+# Use explicit path for .env file relative to this file
+ENV_PATH = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=ENV_PATH)
 
 class InoreaderClient:
     def __init__(self):
         self.base_url = Config.INOREADER_BASE_URL
         self.app_id = Config.INOREADER_APP_ID
         self.app_key = Config.INOREADER_APP_KEY
-        self.username = Config.INOREADER_USERNAME
-        self.password = Config.INOREADER_PASSWORD
+        
+        # Token state
+        self.access_token = Config.INOREADER_ACCESS_TOKEN
+        self.refresh_token = Config.INOREADER_REFRESH_TOKEN
+        try:
+            self.token_expires = float(Config.INOREADER_TOKEN_EXPIRES or 0)
+        except ValueError:
+            self.token_expires = 0
+            
         self.cache = TTLCache(maxsize=100, ttl=Config.CACHE_TTL)
         self.session = None
-        self.auth_token = None
+        self.env_path = os.path.join(os.path.dirname(__file__), '.env')
         
     async def __aenter__(self):
-        # Create SSL context that doesn't verify certificates (for macOS issues)
-        import ssl
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        # Create session with default SSL context (system certs)
+        self.session = aiohttp.ClientSession()
         
-        # Create connector with custom SSL context
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        self.session = aiohttp.ClientSession(connector=connector)
-        await self._authenticate()
+        # Verify we have tokens
+        if not self.access_token or not self.refresh_token:
+            raise Exception("OAuth tokens missing. Please run oauth_setup.py first.")
+            
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
-            
-    async def _authenticate(self):
-        """Authenticate with Inoreader API"""
-        auth_url = 'https://www.inoreader.com/accounts/ClientLogin'
-        params = {
-            'Email': self.username,
-            'Passwd': self.password,
-        }
-        headers = {
-            'AppId': self.app_id,
-            'AppKey': self.app_key,
-        }
-        
+
+    async def _ensure_token_valid(self):
+        """Check if token is expired and refresh if necessary"""
+        # Refresh if expired or expiring in next 60 seconds
+        if time.time() > (self.token_expires - 60):
+            await self._refresh_access_token()
+
+    async def _refresh_access_token(self):
+        """Refresh the OAuth access token"""
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"Authenticating user: {self.username}")
+        logger.info("Refreshing access token...")
         
-        async with self.session.post(auth_url, data=params, headers=headers) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error(f"Auth failed: {resp.status} - {text}")
-                raise Exception(f"Authentication failed: {resp.status} - {text}")
-            
-            text = await resp.text()
-            logger.debug(f"Auth response: {text}")
-            
-            for line in text.split('\n'):
-                if line.startswith('Auth='):
-                    self.auth_token = line[5:]
-                    logger.info(f"Got auth token: {self.auth_token[:10]}...")
-                    break
-            
-            if not self.auth_token:
-                logger.error("No auth token in response")
-                raise Exception("No auth token received")
+        params = {
+            'client_id': self.app_id,
+            'client_secret': self.app_key,
+            'grant_type': 'refresh_token',
+            'refresh_token': self.refresh_token
+        }
+        
+        # We use a separate request context here or the existing session
+        # Using existing session is fine
+        try:
+            async with self.session.post(Config.TOKEN_URL, data=params, timeout=Config.REQUEST_TIMEOUT) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    error_msg = f"Token refresh failed: {resp.status} - {text}. Action required: refresh failed; re-run oauth_setup.py"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 
+                data = await resp.json()
+                
+                new_access_token = data.get('access_token')
+                if not new_access_token:
+                    error_msg = "Token refresh failed: access_token missing in response. Action required: refresh failed; re-run oauth_setup.py"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                self.access_token = new_access_token
+                self.refresh_token = data.get('refresh_token') # Inoreader rotates refresh tokens usually? Check docs. 
+                # If a new refresh token is provided, use it. If not, keep old one.
+                # RFC 6749: "The authorization server MAY issue a new refresh token".
+                if not self.refresh_token:
+                    # Keep existing if not returned
+                    self.refresh_token = params['refresh_token']
+                
+                expires_in = data.get('expires_in', 3600)
+                self.token_expires = time.time() + int(expires_in)
+                
+                logger.info("Token refreshed successfully")
+                
+                # Persist to .env
+                self._save_tokens_to_env()
+                
+        except Exception as e:
+            logger.error(f"Error refreshing token: {e}")
+            raise
+
+    def _save_tokens_to_env(self):
+        """Save updated tokens to .env file"""
+        try:
+            set_key(self.env_path, "INOREADER_ACCESS_TOKEN", self.access_token)
+            set_key(self.env_path, "INOREADER_REFRESH_TOKEN", self.refresh_token)
+            set_key(self.env_path, "INOREADER_TOKEN_EXPIRES", str(int(self.token_expires)))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to save tokens to .env: {e}")
+
     def _get_headers(self) -> Dict[str, str]:
         """Get headers for API requests"""
         return {
-            'Authorization': f'GoogleLogin auth={self.auth_token}',
+            'Authorization': f'Bearer {self.access_token}',
             'AppId': self.app_id,
             'AppKey': self.app_key,
         }
         
     async def _request(self, method: str, endpoint: str, params: Optional[Dict] = None, data: Optional[Dict] = None) -> Any:
         """Make an API request"""
+        
+        # Ensure token is valid before request
+        await self._ensure_token_valid()
+        
         url = f"{self.base_url}/{endpoint}"
         headers = self._get_headers()
         
         timeout = aiohttp.ClientTimeout(total=Config.REQUEST_TIMEOUT)
         
-        # Log request details
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"Making {method} request to {url}")
-        logger.debug(f"Headers: {headers}")
-        logger.debug(f"Params: {params}")
+        logger.debug(f"Making {method} request to {url}")
         
         async with self.session.request(
             method, url, params=params, data=data, headers=headers, timeout=timeout
         ) as resp:
-            logger.info(f"Response status: {resp.status}")
+            # Handle 401 explicitly (Token expired but local check didn't catch it?)
+            if resp.status == 401:
+                logger.warning("Got 401, forcing token refresh...")
+                # Force expiry to trigger refresh
+                self.token_expires = 0
+                await self._ensure_token_valid()
+                # Retry request
+                headers = self._get_headers()
+                async with self.session.request(
+                    method, url, params=params, data=data, headers=headers, timeout=timeout
+                ) as resp_retry:
+                    return await self._process_response(resp_retry)
             
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error(f"API error response: {text}")
-                raise Exception(f"API request failed: {resp.status} - {text}")
-            
-            # Check if response is JSON
-            content_type = resp.headers.get('Content-Type', '')
-            logger.debug(f"Response content-type: {content_type}")
-            
-            if 'application/json' in content_type:
-                result = await resp.json()
-                logger.debug(f"JSON response keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
-                return result
-            else:
-                text = await resp.text()
-                logger.warning(f"Non-JSON response: {text[:200]}")
-                return text
+            return await self._process_response(resp)
+
+    async def _process_response(self, resp):
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if resp.status != 200:
+            text = await resp.text()
+            logger.error(f"API error response: {text}")
+            raise Exception(f"API request failed: {resp.status} - {text}")
+        
+        content_type = resp.headers.get('Content-Type', '')
+        
+        if 'application/json' in content_type:
+            return await resp.json()
+        else:
+            text = await resp.text()
+            return text
                 
     async def get_subscription_list(self) -> List[Dict]:
         """Get list of subscribed feeds"""

@@ -22,59 +22,40 @@ An MCP (Model Context Protocol) server that integrates Inoreader with Claude Des
 
 ## Installation
 
-### 🚀 Auto-Installer (Recommended)
+### Prerequisites
 
-**One command installs everything:**
-```bash
-python3 install_inoreader_mcp.py
-```
+- Python 3.9+
+- An Inoreader account
+- Registered Inoreader Application (for OAuth)
 
-The auto-installer will:
-- ✅ Install all Python dependencies
-- ✅ Prompt for your Inoreader credentials  
-- ✅ Configure Claude Desktop automatically
-- ✅ Leave everything ready to use!
+### 1. Clone and Install
 
-**Windows users:** Double-click `install.bat`
-
-### 📦 Drag & Drop Installation
-
-**Try dragging `inoreader-mcp.dxt` onto Claude Desktop** (experimental - may not work on all versions)
-
-### 🛠️ Manual Installation
-
-1. Clone the repository
 ```bash
 git clone <repository-url>
 cd inoreader_mcp
-```
-
-### 2. Install dependencies
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure credentials
+### 2. Configure Credentials & Authenticate (OAuth)
 
-Copy the `.env.example` file to `.env`:
-```bash
-cp .env.example .env
-```
+This MCP server uses OAuth 2.0 to securely access your Inoreader account.
 
-Edit the `.env` file with your Inoreader credentials:
-```
-INOREADER_APP_ID=your_app_id
-INOREADER_APP_KEY=your_app_key
-INOREADER_USERNAME=your_email
-INOREADER_PASSWORD=your_password
-```
+1.  **Create an App**: Go to [Inoreader Developers](https://www.inoreader.com/developers/) and create a new application.
+    *   **Scope**: Read only
+    *   **Redirect URI**: `http://localhost:8080/oauth/redirect`
+2.  **Create `.env`**: Copy `.env.example` (if available) or create a new `.env` file:
+    ```bash
+    INOREADER_APP_ID=your_app_id
+    INOREADER_APP_KEY=your_app_key
+    INOREADER_REDIRECT_URI=http://localhost:8080/oauth/redirect
+    ```
+3.  **Run Setup Script**:
+    ```bash
+    python oauth_setup.py
+    ```
+    Follow the on-screen instructions to authorize the app in your browser. The script will automatically capture the access tokens and save them to `.env`.
 
-To obtain credentials:
-1. Visit https://www.inoreader.com/developers/
-2. Create a new application
-3. Copy the App ID and App Key
-
-### 4. Configure in Claude Desktop
+### 3. Configure in Claude Desktop
 
 Add to Claude Desktop's configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
@@ -85,15 +66,14 @@ Add to Claude Desktop's configuration file (`~/Library/Application Support/Claud
       "command": "python",
       "args": ["/full/path/to/inoreader_mcp/main.py"],
       "env": {
-        "INOREADER_APP_ID": "your_app_id",
-        "INOREADER_APP_KEY": "your_app_key",
-        "INOREADER_USERNAME": "your_email",
-        "INOREADER_PASSWORD": "your_password"
+        "PYTHONUNBUFFERED": "1"
       }
     }
   }
 }
 ```
+
+*Note: The environment variables are loaded from the `.env` file in the directory, so you don't need to duplicate them in the Claude config.*
 
 ## Usage
 
@@ -138,48 +118,19 @@ inoreader_mcp/
 ├── config.py            # Configuration and credentials
 ├── utils.py             # Helper functions
 ├── requirements.txt     # Python dependencies
-├── .env.example         # Configuration example
-└── README.md           # This file
+├── oauth_setup.py       # OAuth setup script
+└── README.md            # This file
 ```
-
-## Development
-
-### Testing locally
-```bash
-python main.py
-```
-
-### Logs
-Logs are written to console. For debugging, check Claude Desktop's console.
-
-### Limitations
-- Maximum 50 articles per request
-- 5-minute cache for feed list
-- 10-second timeout for API requests
 
 ## Troubleshooting
 
 **Authentication error:**
-- Verify credentials are correct
-- Confirm App has necessary permissions in Inoreader
-
-**MCP doesn't appear in Claude:**
-- Check the full path in configuration file
-- Restart Claude Desktop
-- Confirm Python is in system PATH
+- Run `python oauth_setup.py` again to refresh credentials.
+- Verify App ID and Key in `.env`.
 
 **Request timeouts:**
 - Inoreader API may be slow
 - Try reducing the number of requested articles
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the project
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
 
 ## License
 
