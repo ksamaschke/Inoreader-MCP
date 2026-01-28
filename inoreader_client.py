@@ -66,7 +66,7 @@ class InoreaderClient:
         # We use a separate request context here or the existing session
         # Using existing session is fine
         try:
-            async with self.session.post(Config.TOKEN_URL, data=params) as resp:
+            async with self.session.post(Config.TOKEN_URL, data=params, timeout=Config.REQUEST_TIMEOUT) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     error_msg = f"Token refresh failed: {resp.status} - {text}. Action required: refresh failed; re-run oauth_setup.py"
