@@ -1,7 +1,9 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Use explicit path for .env file relative to this file
+ENV_PATH = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=ENV_PATH)
 
 class Config:
     INOREADER_APP_ID = os.getenv('INOREADER_APP_ID')

@@ -5,8 +5,12 @@ import time
 import os
 from typing import Dict, List, Optional, Any
 from cachetools import TTLCache
-from dotenv import set_key
+from dotenv import load_dotenv, set_key
 from config import Config
+
+# Use explicit path for .env file relative to this file
+ENV_PATH = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=ENV_PATH)
 
 class InoreaderClient:
     def __init__(self):
@@ -27,15 +31,8 @@ class InoreaderClient:
         self.env_path = os.path.join(os.path.dirname(__file__), '.env')
         
     async def __aenter__(self):
-        # Create SSL context that doesn't verify certificates (for macOS issues)
-        import ssl
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        # Create connector with custom SSL context
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        self.session = aiohttp.ClientSession(connector=connector)
+        # Create session with default SSL context (system certs)
+        self.session = aiohttp.ClientSession()
         
         # Verify we have tokens
         if not self.access_token or not self.refresh_token:
@@ -72,12 +69,19 @@ class InoreaderClient:
             async with self.session.post(Config.TOKEN_URL, data=params) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    logger.error(f"Token refresh failed: {resp.status} - {text}")
-                    raise Exception(f"Token refresh failed: {resp.status} - {text}")
+                    error_msg = f"Token refresh failed: {resp.status} - {text}. Action required: refresh failed; re-run oauth_setup.py"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 
                 data = await resp.json()
                 
-                self.access_token = data.get('access_token')
+                new_access_token = data.get('access_token')
+                if not new_access_token:
+                    error_msg = "Token refresh failed: access_token missing in response. Action required: refresh failed; re-run oauth_setup.py"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                self.access_token = new_access_token
                 self.refresh_token = data.get('refresh_token') # Inoreader rotates refresh tokens usually? Check docs. 
                 # If a new refresh token is provided, use it. If not, keep old one.
                 # RFC 6749: "The authorization server MAY issue a new refresh token".
